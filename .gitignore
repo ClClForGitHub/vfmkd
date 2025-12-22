@@ -23,31 +23,38 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# PyTorch
+# PyTorch / 权重与检查点
+# 说明：
+# - 保留通用二进制权重的忽略规则，避免误提交大文件
+# - 如果未来需要跟仓库走的少量预训练权重，可以放在单独子目录并单独取消忽略
 *.pth
 *.pt
 *.ckpt
 *.safetensors
+*.bin
 
-# Dataset files
+# Dataset files / 教师特征与数据缓存
 datasets/
+teacher_features/
 *.npz
 *.npy
 
-# Training outputs
+# Training outputs / 训练输出
 outputs/
 runs/
 results/
 experiments/
+work_dirs/
 
-# Model weights
-weights/
+# Model weights / 模型权重
+weights/checkpoints/
+weights/hub/
 checkpoints/
-*.bin
 
-# Logs
+# Logs / 日志
 *.log
 logs/
+tools/core/logs/
 wandb/
 
 # IDE
@@ -110,3 +117,11 @@ vfmkd/sam2/checkpoints/*.pt
 vfmkd/sam2/demo/
 vfmkd/sam2/notebooks/
 
+# Archives / 历史脚本与外部项目
+archives/
+tools/archives/
+out/
+
+# Tests / 临时测试脚本（核心测试如需保留可单独取消忽略）
+test_*.py
+tests/

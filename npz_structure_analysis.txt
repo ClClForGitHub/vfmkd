@@ -1,0 +1,35 @@
+NPZ 数据结构分析报告
+================================================================================
+
+分析样本数: 50
+总键数: 24
+定长键数: 20
+变长键数: 4
+
+定长键:
+  P4_S16: (1, 256, 64, 64)
+  P5_S32: (1, 256, 32, 32)
+  edge_256x256: (256, 256)
+  edge_64x64: (64, 64)
+  edge_32x32: (32, 32)
+  fg_map_128x128: (128, 128)
+  bg_map_128x128: (128, 128)
+  fg_map_64x64: (64, 64)
+  bg_map_64x64: (64, 64)
+  fg_map_32x32: (32, 32)
+  bg_map_32x32: (32, 32)
+  image_id: ()
+  model_type: ()
+  IMAGE_EMB_S16: (1, 256, 64, 64)
+  feature_flag: ()
+  edge_flag: ()
+  edge_version: ()
+  has_bbox: ()
+  num_bboxes: ()
+  geometry_color_flag: ()
+
+变长键:
+  image_shape: 1 种形状
+  bboxes: 2 种形状
+  masks: 15 种形状
+  edge_original: 2 种形状

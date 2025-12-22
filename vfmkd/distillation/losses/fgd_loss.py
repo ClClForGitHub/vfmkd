@@ -27,14 +27,16 @@ class FGDLoss(nn.Module):
         self.lambda_rela = lambda_rela
         self.temperature = temperature
 
+        # 【修复】将 MSELoss 移到 __init__ 中，避免在 forward 中动态创建（与 CUDA Graph 不兼容）
+        self.loss_mse = nn.MSELoss(reduction='sum')
+
         self.align_conv: nn.Conv2d | None = None
         self.conv_mask_s: nn.Conv2d | None = None
         self.conv_mask_t: nn.Conv2d | None = None
         self.channel_add_conv_s = None
         self.channel_add_conv_t = None
 
-    @staticmethod
-    def _get_attention(x: torch.Tensor, temperature: float) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _get_attention(self, x: torch.Tensor, temperature: float) -> Tuple[torch.Tensor, torch.Tensor]:
         n, c, h, w = x.shape
         value = x.abs()
         fea_map = value.mean(dim=1, keepdim=True)  # (N,1,H,W)
@@ -123,8 +125,8 @@ class FGDLoss(nn.Module):
         context_t = self._spatial_pool_with_conv(t, 't')
         out_s = s + self.channel_add_conv_s(context_s)
         out_t = t + self.channel_add_conv_t(context_t)
-        loss_mse = nn.MSELoss(reduction='sum')
-        return loss_mse(out_s, out_t) / len(out_s)
+        # 【修复】使用预初始化的 loss_mse，而不是动态创建
+        return self.loss_mse(out_s, out_t) / len(out_s)
 
     def forward(
         self,
@@ -173,9 +175,9 @@ class FGDLoss(nn.Module):
         bg_s = fea_s * torch.sqrt(torch.clamp(mask_bg, min=0))
 
         # 前/背景MSE（官方缩放：/len(Mask)~batch size）
-        loss_mse = nn.MSELoss(reduction='sum')
-        loss_fg = loss_mse(fg_s, fg_t) / len(mask_fg)
-        loss_bg = loss_mse(bg_s, bg_t) / len(mask_bg)
+        # 【修复】使用预初始化的 loss_mse，而不是动态创建
+        loss_fg = self.loss_mse(fg_s, fg_t) / len(mask_fg)
+        loss_bg = self.loss_mse(bg_s, bg_t) / len(mask_bg)
 
         # 边缘loss（如果提供了edge_map）
         loss_edge = 0.0
@@ -183,7 +185,7 @@ class FGDLoss(nn.Module):
             # 边缘加权：使用edge_map作为权重
             edge_t = fea_t * torch.sqrt(torch.clamp(edge_map, min=0))
             edge_s = fea_s * torch.sqrt(torch.clamp(edge_map, min=0))
-            loss_edge = loss_mse(edge_s, edge_t) / len(edge_map)
+            loss_edge = self.loss_mse(edge_s, edge_t) / len(edge_map)
 
         # 掩码对齐（官方：|C_s-C_t|/len(C_s) + |S_s-S_t|/len(S_s)）
         mask_loss = torch.sum(torch.abs(c_attn_s - c_attn_t)) / len(c_attn_s)

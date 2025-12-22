@@ -7,39 +7,58 @@ import torch.nn.functional as F
 import sys
 from pathlib import Path
 _project_root = Path(__file__).parent.parent.parent
-if str(_project_root / "vfmkd" / "sam2") not in sys.path:
-    sys.path.insert(0, str(_project_root / "vfmkd" / "sam2"))
-from sam2.modeling.sam2_utils import LayerNorm2d
+_sam2_path = _project_root / "vfmkd" / "sam2"
+if str(_sam2_path) not in sys.path:
+    sys.path.insert(0, str(_sam2_path))
+try:
+    from sam2.modeling.sam2_utils import LayerNorm2d
+except ImportError:
+    # 如果sam2不可用，使用PyTorch的LayerNorm作为替代
+    import torch.nn as nn
+    LayerNorm2d = nn.LayerNorm
+from mmengine.model import BaseModule
+from mmdet.registry import MODELS
 
 
-class Sam2ImageAdapter(nn.Module):
+@MODELS.register_module()
+class Sam2ImageAdapter(BaseModule):
     """
-    EdgeSAM风格的对齐适配器：1x1 Conv → LayerNorm2d → 3x3 Conv → LayerNorm2d。
-    - 输入：来自backbone的 [s8, s16, s32] 特征列表
-    - 仅使用 s16 分支进行对齐到 SAM2 的 image_embeddings 空间
-    - 输出：张量 (B, 256, 64, 64)
+    Adapter to align student features with SAM2 teacher features.
+    This adapter is used to bridge the gap between student and teacher feature spaces.
     """
+    
+    def __init__(self, in_channels: int, out_channels: int = 256, **kwargs):
+        """
+        Initialize the SAM2 Image Adapter.
+        
+        Args:
+            in_channels: Number of input channels from student backbone
+            out_channels: Number of output channels (should match SAM2 feature channels, typically 256)
+        """
+        super().__init__(**kwargs)
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        
+        # 1x1 convolution to adjust channel dimensions
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
+        
+        # Layer normalization for feature alignment
+        self.norm = LayerNorm2d(out_channels)
 
-    def __init__(self, in_channels_s16: int, image_size: int = 1024, hidden_dim: int = 256):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-        self.image_size = image_size
-        self.target_hw = image_size // 16  # 64 when image_size=1024
-
-        self.proj = nn.Conv2d(in_channels_s16, hidden_dim, kernel_size=1, bias=False)
-        self.ln1 = LayerNorm2d(hidden_dim)
-        self.conv3 = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1, bias=False)
-        self.ln2 = LayerNorm2d(hidden_dim)
-
-    def forward(self, features: List[torch.Tensor]) -> torch.Tensor:
-        assert len(features) >= 2, "需要 [s8, s16, s32] 中至少到 s16"
-        feat_s16 = features[1]
-        x = self.proj(feat_s16)
-        x = self.ln1(x)
-        x = self.conv3(x)
-        x = self.ln2(x)
-        if x.shape[-1] != self.target_hw or x.shape[-2] != self.target_hw:
-            x = F.interpolate(x, size=(self.target_hw, self.target_hw), mode="bilinear", align_corners=False)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass through the adapter.
+        
+        Args:
+            x: Input tensor of shape (B, C, H, W) from student backbone
+            
+        Returns:
+            Aligned feature tensor of shape (B, out_channels, H, W)
+        """
+        # Channel adjustment
+        x = self.conv(x)
+        
+        # Normalization
+        x = self.norm(x)
+        
         return x
-
-

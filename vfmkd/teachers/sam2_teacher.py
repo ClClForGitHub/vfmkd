@@ -10,8 +10,18 @@ from pathlib import Path
 import sys
 from typing import Dict, Tuple, Optional, Union, List
 import warnings
-import matplotlib.pyplot as plt
 import cv2
+
+# matplotlib 延迟导入，避免启动时的依赖问题
+plt = None
+def _lazy_import_matplotlib():
+    global plt
+    if plt is None:
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError as e:
+            raise ImportError(f"matplotlib 导入失败，可视化功能不可用: {e}") from e
+    return plt
 
 from .base_teacher import BaseTeacher
 
@@ -157,6 +167,9 @@ class SAM2Teacher(BaseTeacher):
         """可视化特征能量图"""
         if not self.enable_visualization:
             return
+        
+        # 延迟导入 matplotlib
+        plt = _lazy_import_matplotlib()
             
         # 创建可视化输出目录
         vis_dir = Path(self.vis_output_dir)

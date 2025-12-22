@@ -1,0 +1,18 @@
+__include__: [
+  '../dfine/dfine_hgnetv2_s_coco.yml',
+  '../base/rtv4.yml'
+]
+
+output_dir: ./outputs/rtv4_hgnetv2_s_coco
+
+teacher_model:
+  type: "DINOv3TeacherModel"
+  # 使用HuggingFace格式的权重（自动检测）
+  dinov3_weights_path: /home/team/zouzhiyuan/vfmkd/weights/dinoV3
+  dinov3_model_type: dinov3_vitb16  # 可选，用于torch.hub格式
+  patch_size: 16
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+
+HybridEncoder:
+  distill_teacher_dim: 768  # ViT-B/16的特征维度

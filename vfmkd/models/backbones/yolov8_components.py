@@ -2,10 +2,12 @@
 YOLOv8 core components implementation.
 """
 
+import math
+from typing import Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, Optional
 
 
 class Conv(nn.Module):
@@ -41,6 +43,16 @@ class Conv(nn.Module):
         if p is None:
             p = k // 2 if isinstance(k, int) else [x // 2 for x in k]
         return p
+
+
+class DWConv(Conv):
+    """
+    Depthwise separable convolution（带 BN + SiLU）。
+    """
+
+    def __init__(self, c1: int, c2: int, k: int = 3, s: int = 1, act: bool = True):
+        g = math.gcd(c1, c2)
+        super().__init__(c1, c2, k, s, g=g, act=act)
 
 
 class Bottleneck(nn.Module):
@@ -144,19 +156,31 @@ class CSPDarknet(nn.Module):
         """
         super().__init__()
         
-        # Model configurations
-        configs = {
-            'n': [64, 128, 256, 512, 1024],  # [c1, c2, c3, c4, c5]
-            's': [64, 128, 256, 512, 1024],
-            'm': [96, 192, 384, 768, 1536],
-            'l': [128, 256, 512, 1024, 2048],
-            'x': [160, 320, 640, 1280, 2560],
-        }
+        # 定义深度和宽度系数，严格对齐Ultralytics官方定义
+        depth_multiple, width_multiple = {
+            'n': (0.33, 0.25),
+            's': (0.33, 0.50),
+            'm': (0.67, 0.75),
+            'l': (1.00, 1.00),
+            'x': (1.00, 1.25),
+        }[model_size]
+
+        # 基础通道数
+        base_channels = 64
         
-        if model_size not in configs:
-            raise ValueError(f"Unknown model size: {model_size}")
+        # 根据宽度系数计算实际通道数
+        defgw = lambda ch: int(ch * width_multiple)
+
+        channels = [
+            defgw(base_channels),      # c1: 64 * width_multiple
+            defgw(base_channels * 2),  # c2: 128 * width_multiple
+            defgw(base_channels * 4),  # c3: 256 * width_multiple
+            defgw(base_channels * 8),  # c4: 512 * width_multiple
+            defgw(base_channels * 16)  # c5: 1024 * width_multiple, for SPPF input
+        ]
         
-        channels = configs[model_size]
+        # 根据深度系数计算重复次数
+        n_repeats = lambda n: max(round(n * depth_multiple), 1) if n > 1 else n
         
         # Stem
         self.stem = Conv(3, channels[0], k=3, s=2, p=1)
@@ -164,30 +188,34 @@ class CSPDarknet(nn.Module):
         # Stage 1
         self.stage1 = nn.Sequential(
             Conv(channels[0], channels[1], k=3, s=2, p=1),
-            C2f(channels[1], channels[1], n=1, shortcut=True)
+            C2f(channels[1], channels[1], n=n_repeats(3), shortcut=True)
         )
         
         # Stage 2
         self.stage2 = nn.Sequential(
             Conv(channels[1], channels[2], k=3, s=2, p=1),
-            C2f(channels[2], channels[2], n=2, shortcut=True)
+            C2f(channels[2], channels[2], n=n_repeats(6), shortcut=True)
         )
         
         # Stage 3
         self.stage3 = nn.Sequential(
             Conv(channels[2], channels[3], k=3, s=2, p=1),
-            C2f(channels[3], channels[3], n=2, shortcut=True)
+            C2f(channels[3], channels[3], n=n_repeats(6), shortcut=True)
         )
         
         # Stage 4
+        # 注意：Stage4的输出通道数在YOLOv8中通常与c4不同，这里简化处理。
+        # Ultralytics的yaml中，最后一个C2f输出通道是 1024*width_multiple
+        last_c2f_out_channels = int(1024 * width_multiple)
         self.stage4 = nn.Sequential(
-            Conv(channels[3], channels[4], k=3, s=2, p=1),
-            C2f(channels[4], channels[4], n=1, shortcut=True),
-            SPPF(channels[4], channels[4], k=5)
+            Conv(channels[3], last_c2f_out_channels, k=3, s=2, p=1),
+            C2f(last_c2f_out_channels, last_c2f_out_channels, n=n_repeats(3), shortcut=True),
+            SPPF(last_c2f_out_channels, last_c2f_out_channels, k=5)
         )
         
         # Store channel info for feature extraction
         self.channels = channels
+        self.last_c2f_out_channels = last_c2f_out_channels
         self.model_size = model_size
     
     def forward(self, x: torch.Tensor) -> list:
@@ -235,7 +263,7 @@ class CSPDarknet(nn.Module):
     def get_feature_dims(self) -> list:
         """Get feature dimensions."""
         # 返回 [S4, S8, S16, S32] 的通道数
-        # S4和S8都是channels[1]，S16是channels[2]，S32是channels[3]
+        # S4/S8来自stage1, S16来自stage2, S32来自stage3
         return [self.channels[1], self.channels[1], self.channels[2], self.channels[3]]
     
     def get_feature_strides(self) -> list:

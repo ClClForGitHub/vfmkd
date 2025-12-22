@@ -25,6 +25,10 @@ if str(sam2_path) not in sys.path:
     sys.path.insert(0, str(sam2_path))
 
 from vfmkd.teachers.sam2_teacher import SAM2Teacher
+from tools.core.bbox.test_bbox_strategies import (
+    load_sa_json,
+    compute_strategy_geometry_color,
+)
 
 
 class SA1BFeatureExtractor:
@@ -47,13 +51,18 @@ class SA1BFeatureExtractor:
         self.kernel_size = config.get('kernel_size', 3)
         self.kernel = np.ones((self.kernel_size, self.kernel_size), dtype=np.uint8)
         
+        # 选框策略配置                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             说
+        self.max_instances = config.get('max_instances', 1)
+        self.enable_bbox_selection = config.get('enable_bbox_selection', True)
+        
         print(f"✅ 特征提取器初始化完成")
         print(f"设备: {self.device}")
         print(f"教师模型: {self.teacher.model_name}")
     
     def extract_edges_and_weights_optimized(self, json_path, edge_sizes=[256, 64, 32], weight_sizes=[128, 64, 32]):
         """
-        优化版：合并解码 + 只做一次形态学操作 + 同时生成边缘图和权重图
+        优化版：使用Method B（每实例提取边缘后合并）+ 同时生成边缘图和权重图
+        完全复刻edge_comparison中的Method B（CPU优化版本）
         
         Args:
             json_path: JSON标注文件路径
@@ -75,19 +84,30 @@ class SA1BFeatureExtractor:
         # 获取所有RLE标注
         annotations = data['annotations']
         
+        # === 使用Method B提取边缘（CPU优化版本，与edge_comparison完全一致）===
         if len(annotations) == 0:
             # 没有标注，返回空图
             union_mask = np.zeros((height, width), dtype=np.uint8)
+            combined_edge_map = np.zeros((height, width), dtype=np.uint8)
         else:
-            # 单进程顺序解码并合并（避免Windows多进程开销）
+            # Method B：每个实例单独提取边缘后合并
+            combined_edge_map = np.zeros((height, width), dtype=np.uint8)
             union_mask = np.zeros((height, width), dtype=np.uint8)
+            
             for ann in annotations:
                 rle = ann['segmentation']
-                mask = mask_utils.decode(rle)
+                mask = mask_utils.decode(rle)  # 从RLE解码
+                
+                # 合并掩码（用于权重图）
                 union_mask = np.maximum(union_mask, mask)
         
-        # 在合并后的掩码上提取边缘（只做一次形态学操作！）
-        combined_edge_map = cv2.morphologyEx(union_mask, cv2.MORPH_GRADIENT, self.kernel)
+                # 对每个实例单独提取边缘
+                edge = cv2.morphologyEx(mask, cv2.MORPH_GRADIENT, self.kernel)
+                # 二值化并确保uint8类型（避免类型不匹配和溢出警告）
+                edge = (edge > 0).astype(np.uint8)
+                
+                # 使用bitwise_or替代logical_or（直接在uint8上操作）
+                combined_edge_map = np.bitwise_or(combined_edge_map, edge)
         
         # === 生成多尺度边缘图 ===
         edge_maps = {'original': combined_edge_map}
@@ -165,6 +185,71 @@ class SA1BFeatureExtractor:
             )
             timing['edges_and_weights'] = time.time() - t0
             
+            # 4. 应用geometry_color策略选择框和掩码（新增，复用已有image_rgb）
+            bbox_result = None
+            if self.enable_bbox_selection:
+                t0 = time.time()
+                try:
+                    # 准备图像信息（复用已有的image_rgb，避免重复读取）
+                    H, W = image_rgb.shape[:2]
+                    data = {
+                        'image': {
+                            'height': H,
+                            'width': W,
+                            'h': H,
+                            'w': W,
+                        }
+                    }
+                    
+                    # 加载JSON标注（复用json_path）
+                    sa_data = load_sa_json(str(json_path))
+                    annotations = sa_data.get('annotations', [])
+                    
+                    # 应用策略（直接使用已有的image_rgb，注意需要BGR格式）
+                    image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+                    selected_components = compute_strategy_geometry_color(
+                        data=data,
+                        annotations=annotations,
+                        image_rgb=image_bgr,  # 函数内部会转换，这里传入BGR
+                        clip_data=None,
+                        max_instances=self.max_instances,
+                        max_display=10,
+                        debug_trace=None,
+                    )
+                    
+                    # 提取框和掩码
+                    if len(selected_components) > 0:
+                        bboxes = []
+                        masks = []
+                        for comp in selected_components:
+                            bboxes.append(comp['box'])  # [x, y, w, h]
+                            masks.append(comp['mask'])  # [H, W] uint8
+                        
+                        bbox_result = {
+                            'has_bbox': True,
+                            'bboxes': np.array(bboxes, dtype=np.float32),
+                            'masks': masks,
+                        }
+                    else:
+                        bbox_result = {
+                            'has_bbox': False,
+                            'bboxes': np.empty((0, 4), dtype=np.float32),
+                            'masks': [],
+                        }
+                    timing['bbox_selection'] = time.time() - t0
+                except Exception as e:
+                    # 选框失败不影响其他数据保存，使用空结果
+                    print(f"⚠️  选框策略失败 {image_id}: {e}")
+                    bbox_result = {
+                        'has_bbox': False,
+                        'bboxes': np.empty((0, 4), dtype=np.float32),
+                        'masks': [],
+                    }
+                    timing['bbox_selection'] = 0.0
+            else:
+                bbox_result = None
+                timing['bbox_selection'] = 0.0
+            
             # 5. 保存特征、边缘图和权重图
             output_path = Path(output_dir)
             output_path.mkdir(parents=True, exist_ok=True)
@@ -186,6 +271,15 @@ class SA1BFeatureExtractor:
             for size in [128, 64, 32]:
                 save_data[f'fg_map_{size}x{size}'] = weight_maps[size]['fg_map']
                 save_data[f'bg_map_{size}x{size}'] = weight_maps[size]['bg_map']
+            
+            # 添加选框结果（如果启用）
+            if bbox_result is not None:
+                save_data['has_bbox'] = np.array(bbox_result['has_bbox'], dtype=bool)
+                save_data['num_bboxes'] = np.array(len(bbox_result['bboxes']), dtype=np.int32)
+                save_data['bboxes'] = bbox_result['bboxes']  # (N, 4) or (0, 4)
+                if bbox_result['has_bbox'] and len(bbox_result['masks']) > 0:
+                    save_data['masks'] = np.array(bbox_result['masks'], dtype=object)
+                save_data['geometry_color_flag'] = np.array(1, dtype=np.uint8)  # 标记已处理
             
             # 添加元数据
             save_data['image_id'] = image_id
@@ -249,7 +343,8 @@ class SA1BFeatureExtractor:
         success_count = 0
         error_count = 0
         skipped_count = 0
-        avg_timing = {'load_image': 0, 'sam2_features': 0, 'edges_and_weights': 0, 'save_npz': 0}
+        avg_timing = {'load_image': 0, 'sam2_features': 0, 'edges_and_weights': 0, 
+                      'bbox_selection': 0, 'save_npz': 0}
         
         for image_file in tqdm(image_files, desc="提取特征和边缘图"):
             image_id = image_file.stem
@@ -278,10 +373,12 @@ class SA1BFeatureExtractor:
                 
                 # 每10张打印一次详细计时
                 if success_count % 10 == 0:
+                    bbox_time = result['timing'].get('bbox_selection', 0)
                     print(f"\n✅ {result['image_id']}: 总{result['total_time']:.2f}s "
                           f"[加载{result['timing']['load_image']:.3f}s | "
                           f"SAM2特征{result['timing']['sam2_features']:.3f}s | "
                           f"边缘+权重图{result['timing']['edges_and_weights']:.3f}s | "
+                          f"选框{bbox_time:.3f}s | "
                           f"保存{result['timing']['save_npz']:.3f}s]")
             else:
                 error_count += 1
@@ -315,9 +412,15 @@ def main():
                        help="教师模型类型")
     parser.add_argument("--checkpoint", type=str, default=None, help="权重文件路径")
     parser.add_argument("--kernel-size", type=int, default=3, help="边缘提取核大小")
-    parser.add_argument("--device", type=str, default=None, help="指定GPU设备 (如: cuda:0, cuda:3)")
+    parser.add_argument("--device", type=str, default="cuda:6", help="指定GPU设备 (如: cuda:0, cuda:3)，默认cuda:6")
     parser.add_argument("--diag-compare", action='store_true', help="启用诊断：保存前对比分布，打印mean/std")
     parser.add_argument("--diag-fallback", action='store_true', help="启用回退：若std异常则回退为/255实时特征")
+    parser.add_argument('--max-instances', type=int, default=1,
+                       help='选框策略最多选择的实例数（默认1）')
+    parser.add_argument('--enable-bbox-selection', action='store_true', default=True,
+                       help='启用选框策略（默认启用）')
+    parser.add_argument('--disable-bbox-selection', dest='enable_bbox_selection', action='store_false',
+                       help='禁用选框策略')
     
     args = parser.parse_args()
     
@@ -346,7 +449,9 @@ def main():
             'enable_diag_compare': bool(args.diag_compare),
             'fallback_if_high_std': bool(args.diag_fallback),
         },
-        'kernel_size': args.kernel_size
+        'kernel_size': args.kernel_size,
+        'max_instances': args.max_instances,
+        'enable_bbox_selection': args.enable_bbox_selection,
     }
     
     print("=== 第一版特征提取 ===")

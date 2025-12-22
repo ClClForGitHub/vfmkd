@@ -38,7 +38,7 @@ import time
 import logging
 import contextlib
 from pathlib import Path
-from typing import List
+from typing import Any, List, Optional, Union
 from datetime import datetime
 from zipfile import BadZipFile
 import tarfile
@@ -75,6 +75,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128")
 # 添加项目根目录到路径（从tools/core/exper/向上三级到VFMKD/）
 _script_dir = os.path.dirname(os.path.abspath(__file__))  # tools/core/exper/
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(_script_dir)))  # VFMKD/
+DEFAULT_WEIGHTS_DIR = Path(os.environ.get("VFMKD_WEIGHTS_DIR", os.path.join(project_root, "weights")))
 sys.path.insert(0, project_root)
 
 # 添加 RT-DETR v2 源码目录，供后续直接 import
@@ -82,12 +83,92 @@ _rtdetr_src_dir = os.path.join(project_root, "tools", "core", "RT-DETR-main", "R
 if os.path.isdir(_rtdetr_src_dir) and _rtdetr_src_dir not in sys.path:
     sys.path.insert(0, _rtdetr_src_dir)
 
+# 提前导入 torchvision，确保 libstdc++ 环境已设置（RT-DETR 的某些模块会导入 torchvision）
+try:
+    import torchvision
+except ImportError:
+    pass  # 如果导入失败，继续执行（可能在后续会再次尝试导入）
+
 # 导入二进制数据集类
 from tools.core.exper.binary_dataset import BinaryDistillDataset
+
+# 导入可视化器（延迟导入，避免在显示帮助信息时就触发导入错误）
+try:
+    from tools.core.exper.distill_visualizer import DistillVisualizer
+    VISUALIZER_AVAILABLE = True
+except ImportError:
+    VISUALIZER_AVAILABLE = False
 
 # 延迟导入：只在真正需要时导入模块，避免在显示帮助信息时就触发导入错误
 # 这些导入会在 DistillSingleTester 类初始化时进行
 import importlib
+
+# 预训练权重解析辅助函数
+def _normalize_pretrained_path(path: str | None) -> str | None | bool:
+    if not path:
+        return False
+    if isinstance(path, str) and path.startswith(("http://", "https://")):
+        return path
+    expanded_path = Path(path).expanduser()
+    if not expanded_path.exists():
+        return False
+    return str(expanded_path)
+
+
+def _auto_pretrained_filename(
+    backbone: str, variant: str | None = None, depth: int | None = None
+) -> str | None:
+    """根据 backbone 类型/变体推断官方预训练权重的默认文件名。"""
+    backbone = (backbone or "").lower()
+    variant = (variant or "").lower()
+    if backbone == "hgnetv2":
+        mapping = {
+            "l": "PPHGNetV2_L_ssld_pretrained_from_paddle.pth",
+            "x": "PPHGNetV2_X_ssld_pretrained_from_paddle.pth",
+            "h": "PPHGNetV2_H_ssld_pretrained_from_paddle.pth",
+        }
+        return mapping.get(variant)
+    if backbone == "presnet":
+        depth_mapping = {
+            18: "ResNet18_vd_pretrained_from_paddle.pth",
+            34: "ResNet34_vd_pretrained_from_paddle.pth",
+            50: "ResNet50_vd_ssld_v2_pretrained_from_paddle.pth",
+            101: "ResNet101_vd_ssld_pretrained_from_paddle.pth",
+        }
+        return depth_mapping.get(int(depth or 0))
+    if backbone == "cspresnet":
+        mapping = {
+            "s": "CSPResNetb_s_pretrained_from_paddle.pth",
+            "m": "CSPResNetb_m_pretrained_from_paddle.pth",
+            "l": "CSPResNetb_l_pretrained_from_paddle.pth",
+            "x": "CSPResNetb_x_pretrained_from_paddle.pth",
+        }
+        return mapping.get(variant)
+    return None
+
+
+def _resolve_pretrained_checkpoint(
+    backbone: str, variant: str | None, depth: int | None, user_value
+) -> str | bool:
+    """
+    解析最终要加载的预训练路径：
+      1. 用户显式传入路径 -> 归一化后使用
+      2. 用户传入 False -> 不加载
+      3. 用户未指定 -> 在 DEFAULT_WEIGHTS_DIR 下按约定文件名查找
+    """
+    if isinstance(user_value, str) and user_value.strip():
+        return _normalize_pretrained_path(user_value)
+    if user_value is False:
+        return False
+    filename = _auto_pretrained_filename(backbone, variant, depth)
+    if filename:
+        candidate = DEFAULT_WEIGHTS_DIR / filename
+        if candidate.exists():
+            logger.info("[PRETRAIN] 使用本地预训练权重: %s", candidate)
+            return str(candidate)
+        logger.warning("[PRETRAIN] 未在 %s 找到 %s，忽略自动加载", DEFAULT_WEIGHTS_DIR, filename)
+    return False
+
 
 # 定义导入函数，延迟到真正需要时再导入
 class RTDETRBackboneAdapter(nn.Module):
@@ -132,30 +213,35 @@ class RTDETRBackboneAdapter(nn.Module):
 def _import_backbones():
     """延迟导入 RT-DETR v2 backbone 构建函数。"""
     try:
-        from src.nn.backbone import PResNet, HGNetv2, CSPResNet, TimmModel
+        # 直接导入 backbone 模块，避免触发 nn/__init__.py 中的其他模块导入
+        import importlib
+        backbone_module = importlib.import_module('src.nn.backbone')
+        PResNet = backbone_module.PResNet
+        HGNetv2 = backbone_module.HGNetv2
+        CSPResNet = backbone_module.CSPResNet
+        TimmModel = backbone_module.TimmModel
     except ImportError as e:
         raise ImportError(f"导入 RT-DETR v2 backbone 模块失败: {e}") from e
 
     default_return_idx = [0, 1, 2, 3]
 
-    def _normalize_pretrained_path(path: str | None) -> str | None:
-        if not path:
-            return None
-        if isinstance(path, str) and path.startswith(("http://", "https://")):
-            return path
-        return str(Path(path).expanduser())
-
     def build_rtdetrv2_backbone(config: dict) -> nn.Module:
         backbone_type = config.get("student_backbone_type", "PResNet")
         return_idx = config.get("student_return_idx") or default_return_idx
         return_idx = [int(idx) for idx in return_idx]
-        pretrained_path = _normalize_pretrained_path(config.get("student_pretrained"))
-        freeze_norm = bool(config.get("student_backbone_freeze_norm", False))
         depth = int(config.get("student_backbone_depth", 50))
         variant = config.get("student_backbone_variant", "L")
+        pretrained_path = _resolve_pretrained_checkpoint(
+            backbone_type,
+            variant,
+            depth,
+            config.get("student_pretrained"),
+        )
+        freeze_norm = bool(config.get("student_backbone_freeze_norm", False))
 
         if backbone_type == "PResNet":
             presnet_variant = config.get("student_presnet_variant", "d")
+            pretrained_val = pretrained_path if pretrained_path else False
             model = PResNet(
                 depth=depth,
                 variant=presnet_variant,
@@ -163,20 +249,23 @@ def _import_backbones():
                 return_idx=return_idx,
                 act="relu",
                 freeze_norm=freeze_norm,
-                pretrained=pretrained_path or False,
+                pretrained=pretrained_val,
             )
         elif backbone_type == "HGNetv2":
+            # pretrained_path 可能是 False、路径字符串或 None
+            pretrained_val = pretrained_path if pretrained_path else False
             model = HGNetv2(
                 name=variant.upper(),
                 return_idx=return_idx,
                 freeze_norm=freeze_norm,
-                pretrained=pretrained_path or False,
+                pretrained=pretrained_val,
             )
         elif backbone_type == "CSPResNet":
+            pretrained_val = pretrained_path if pretrained_path else False
             model = CSPResNet(
                 name=variant.lower(),
                 return_idx=return_idx,
-                pretrained=pretrained_path or False,
+                pretrained=pretrained_val,
             )
         elif backbone_type == "TimmModel":
             return_layers = config.get(
@@ -1675,14 +1764,22 @@ class DistillSingleTester:
         # 【商业级优化】图像归一化层：集成到模型中，避免循环内的Kernel Launch
         # 创建一个简单的归一化模块，可被torch.compile优化
         class ImageNormalize(nn.Module):
-            """将uint8图像归一化到[0,1]的float32，可被torch.compile优化"""
+            """将输入统一转换为 ImageNet 预处理格式，可被 torch.compile 优化"""
             def __init__(self):
                 super().__init__()
                 self.scale = 1.0 / 255.0
+                mean = torch.tensor([0.485, 0.456, 0.406])
+                std = torch.tensor([0.229, 0.224, 0.225])
+                self.register_buffer("mean", mean.view(1, 3, 1, 1))
+                self.register_buffer("std", std.view(1, 3, 1, 1))
             
             def forward(self, x: torch.Tensor) -> torch.Tensor:
-                # x: [B, 3, H, W] uint8
-                return x.float().mul_(self.scale)
+                # x: [B, 3, H, W] uint8 或 float
+                if x.dtype == torch.uint8:
+                    x = x.float().mul_(self.scale)
+                else:
+                    x = x.float()
+                return (x - self.mean) / self.std
         
         self.image_normalize = ImageNormalize().to(self.device)
         
@@ -1693,9 +1790,9 @@ class DistillSingleTester:
         s4_c, s16_c = infer_feature_channels(self.backbone, device=self.device, img_size=1024)
         teacher_c = int(config.get("teacher_channels", 256))
 
-        self.edge_adapter = self.EdgeAdapterStatic(in_channels=s4_c, target_channels=256, target_size=256).to(self.device)
+        self.edge_adapter = self.EdgeAdapterStatic(in_channels=s4_c, target_channels=64, target_size=256).to(self.device)
         self.edge_head = self.UniversalEdgeHead(
-            core_channels=256,
+            core_channels=64,
             output_channels=1,
             head_type=config.get("head_type", "simple"),
             init_p=0.05,
@@ -1755,7 +1852,7 @@ class DistillSingleTester:
         self.mask_loss_weight = float(config.get("mask_loss_weight", 1.0))
         self.mask_head_unfreeze_epoch = int(config.get("mask_head_unfreeze_epoch", 100))
         self._mask_head_frozen = False
-        self.mask_loss: EdgeDistillationLoss | None = None
+        self.mask_loss: Any | None = None
         self.sam_prompt_encoder = None
         self.sam_mask_decoder = None
         self.sam_image_pe = None
@@ -2215,14 +2312,17 @@ class DistillSingleTester:
         # 这样我们在算 Loss 时可以把 dummy 样本的 Loss 乘 0
         return pred_masks_logits, gt_masks_256_binary, valid_mask_vec
         
-    def train_epoch(self, loader: DataLoader, epoch: int, external_total_batches: int | None = None):
+    def train_epoch(self, loader: DataLoader, epoch: int, external_total_batches: Optional[int] = None, 
+                   visualizer: Optional['DistillVisualizer'] = None, vis_interval: int = 1):
         """
         Train one epoch.
         
         Args:
             loader (DataLoader): The data loader for the training set.
             epoch (int): The current epoch number.
-            external_total_batches (int | None): If provided, use this as the total number of batches for tqdm.
+            external_total_batches (Optional[int]): If provided, use this as the total number of batches for tqdm.
+            visualizer (Optional[DistillVisualizer]): 可视化器实例，用于训练过程可视化
+            vis_interval (int): 可视化间隔（Epoch数），设置为0禁用可视化
         """
         self.backbone.train()
         self.feature_adapter.train()
@@ -2304,11 +2404,8 @@ class DistillSingleTester:
             # 数据预取到GPU (如果使用 prefetcher)
             if not isinstance(loader.dataset, IterableDataset):
                 try:
-                    images = batch["image"].to(self.device, non_blocking=True)
+                    images_u8 = batch["image"].to(self.device, non_blocking=True)
                     teacher_features = batch["teacher_features"].to(self.device, non_blocking=True)
-                    # 图像归一化：将 uint8 [0, 255] 转换为 float32 [0, 1]
-                    if images.dtype == torch.uint8:
-                        images = images.float().div(255.0)
                 except Exception as e:
                     logger.error(f"Batch {batch_idx}: Error moving batch to device: {e}")
                     # 尝试打印 batch 内容以诊断
@@ -2320,12 +2417,10 @@ class DistillSingleTester:
                     continue
             else:
                 # IterableDataset (tar_shard 模式) 也需要移动到设备
-                images = batch["image"].to(self.device, non_blocking=True)
+                images_u8 = batch["image"].to(self.device, non_blocking=True)
                 teacher_features = batch["teacher_features"].to(self.device, non_blocking=True)
             
-            # 图像归一化：将 uint8 [0, 255] 转换为 float32 [0, 1]
-            if images.dtype == torch.uint8:
-                images = images.float().div(255.0)
+            images = self.image_normalize(images_u8).contiguous(memory_format=torch.channels_last)
             
             interval_timer.stop('data')
 
@@ -2476,6 +2571,57 @@ class DistillSingleTester:
                     loss_elapsed = time.time() - t_loss_start
                     logger.info(f"[DEBUG] Batch {debug_steps}: Loss 计算完成 (耗时 {loss_elapsed:.4f}s)")
                     debug_steps += 1
+                
+                # ========= VISUALIZATION HOOK =========
+                # 只在指定 Epoch 的第一个 Batch 进行可视化
+                if visualizer is not None and vis_interval > 0 and (epoch % vis_interval == 0) and (batch_idx == 0):
+                    # 收集需要的数据
+                    
+                    # 1. 边缘 logits
+                    student_edge_logits = None
+                    if self._is_edge_task_active(epoch):
+                        # 重新计算一次（开销很小，只针对第一个batch）
+                        with torch.no_grad():
+                            aligned_s4 = self.edge_adapter(s4_features)
+                            student_edge_logits = self.edge_head(aligned_s4)
+
+                    # 2. 掩码 logits
+                    student_mask_logits = None
+                    if self._is_mask_task_active(epoch) and box_prompts_xyxy is not None:
+                        # 同样，复用或重新计算
+                        with torch.no_grad():
+                            aligned_s16_for_mask = self.feature_adapter(s16_features)
+                            # 注意：_forward_mask_head 会返回 (logits, gt, valid)
+                            logits, _, _ = self._forward_mask_head(
+                                aligned_s16_for_mask,
+                                box_prompts_xyxy,
+                                box_prompts_masks_orig,
+                                box_prompts_count,
+                                image_shapes=image_shapes
+                            )
+                            student_mask_logits = logits
+
+                    # 3. 获取 s32 (P5) 特征用于可视化
+                    s32_features = features[3] if len(features) > 3 else None
+                    
+                    # 4. 特征包（s16是已对齐的特征）
+                    aligned_s16_for_vis = self.feature_adapter(s16_features).detach()
+                    student_feats = {
+                        's16': aligned_s16_for_vis,
+                        's32': s32_features.detach() if s32_features is not None else None
+                    }
+                    
+                    # 调用可视化
+                    logger.info(f"🎨 [VIS] Visualizing batch {batch_idx} of epoch {epoch}...")
+                    visualizer.visualize(
+                        batch=batch,  # 包含 teacher_features, image, edge_gt, masks 等
+                        student_features=student_feats,
+                        student_edge_logits=student_edge_logits.detach() if student_edge_logits is not None else None,
+                        student_mask_logits=student_mask_logits.detach() if student_mask_logits is not None else None,
+                        epoch=epoch,
+                        batch_idx=batch_idx
+                    )
+                # ========= END VISUALIZATION HOOK =========
             
             handle = interval_timer.start('backward')
             self.scaler.scale(total_loss).backward()
@@ -3019,6 +3165,10 @@ def main():
     parser.add_argument("--enable-detailed-mask-logging", action="store_true",
                        help="启用详细的辨析头诊断日志（默认关闭）")
     
+    # === 【新增】可视化参数 ===
+    parser.add_argument("--vis-interval", type=int, default=1,
+                       help="可视化间隔（Epoch数），默认每1个Epoch可视化一次。设置为0禁用可视化")
+    
     # === 【新增】禁用编译开关 ===
     parser.add_argument("--no-compile", action="store_true",
                        help="禁用 torch.compile 加速，大幅减少启动等待时间（调试/测试推荐开启）")
@@ -3552,6 +3702,18 @@ def main():
     
     runner = DistillSingleTester(config, device=device)
     
+    # === 初始化可视化器 ===
+    visualizer = None
+    if VISUALIZER_AVAILABLE and args.vis_interval > 0:
+        visualizer = DistillVisualizer(
+            output_dir=output_dir,
+            config=config,
+            device=device
+        )
+        logger.info(f"[VIS] 可视化器已初始化，将每 {args.vis_interval} 个 epoch 可视化一次")
+    elif args.vis_interval > 0:
+        logger.warning("[VIS] 可视化模块不可用（DistillVisualizer 导入失败），禁用可视化")
+    
     start_epoch = 0  # 从 0 开始，显示时使用 epoch+1 以符合人类习惯（第1个epoch）
     if resume_checkpoint is not None:
         logger.info("")
@@ -3683,8 +3845,14 @@ def main():
     else:
         for epoch in range(start_epoch, args.epochs):
             epoch_start_time = time.time()
-            # === 【修改】传入 total_batches_est ===
-            tr_tot, tr_feat, tr_edge, tr_mask = runner.train_epoch(train_loader, epoch, external_total_batches=total_batches_est)
+            # === 【修改】传入 total_batches_est、visualizer 和 vis_interval ===
+            tr_tot, tr_feat, tr_edge, tr_mask = runner.train_epoch(
+                train_loader, 
+                epoch, 
+                external_total_batches=total_batches_est,
+                visualizer=visualizer,
+                vis_interval=args.vis_interval
+            )
             epoch_end_time = time.time()
             epoch_time = epoch_end_time - epoch_start_time
             epoch_times.append(epoch_time)
@@ -3902,8 +4070,8 @@ def visualize_results(runner, dataset, args, config, output_dir: Path):
                 )
             
             # Generate edge map (使用EdgeAdapter对齐S4特征，然后输入边缘头)
-            aligned_s4 = runner.edge_adapter(s4_features)  # [B, 128, 256, 256] -> [B, 256, 256, 256]
-            edge_logits = runner.edge_head(aligned_s4)  # [B, 256, 256, 256] -> [B, 1, 256, 256]
+            aligned_s4 = runner.edge_adapter(s4_features)  # [B, s4_c, 256, 256] -> [B, 64, 256, 256]
+            edge_logits = runner.edge_head(aligned_s4)  # [B, 64, 256, 256] -> [B, 1, 256, 256]
             edge_pred = torch.sigmoid(edge_logits[0, 0]).cpu().numpy()  # (256, 256)
             
             # P4 feature visualization (aligned features)

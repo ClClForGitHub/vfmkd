@@ -1,0 +1,36 @@
+# DinoV3教师模型配置
+name: "DinoV3Teacher"
+model_type: "vit_base"  # vit_small, vit_base, vit_large, vit_giant2
+pretrained: true
+freeze_teacher: true
+
+# 模型路径
+checkpoint_path: "weights/dinov3_vitb14_pretrain.pth"
+
+# 特征提取设置
+extract_cls_token: true
+extract_patch_tokens: true
+patch_size: 14
+
+# 特征维度（根据模型类型自动设置）
+# vit_small: 384
+# vit_base: 768
+# vit_large: 1024
+# vit_giant2: 1536
+
+# 设备配置
+device: "cuda"
+
+# 可视化配置
+enable_visualization: false
+vis_output_dir: "teacher_features/dino/visualizations"
+
+# 存储配置
+feature_output_dir: "teacher_features/dino/"
+format: "npz"
+compression: true
+
+# 蒸馏设置
+offline_mode: true
+cache_features: true
+

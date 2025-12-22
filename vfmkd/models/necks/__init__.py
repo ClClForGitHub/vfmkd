@@ -1,17 +1,7 @@
 """
-Neck implementations for VFMKD.
+Neck 实现与工厂函数。
 """
 
-from .common import LayerNorm2d, UpSampleLayer, OpSequential
+from .yolov8_pafpn import YOLOv8PAFPN
 
-# TODO: Implement necks
-# from .fpn import FPN
-# from .pafpn import PAFPN
-
-__all__ = [
-    "LayerNorm2d",
-    "UpSampleLayer", 
-    "OpSequential",
-    # "FPN",
-    # "PAFPN",
-]
+__all__ = ['YOLOv8PAFPN']

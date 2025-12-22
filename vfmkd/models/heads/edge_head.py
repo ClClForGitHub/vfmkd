@@ -136,11 +136,11 @@ class LightweightEdgeHead(nn.Module):
 
 class UniversalEdgeHead(nn.Module):
     """
-    通用边缘头：支持动态通道对齐
-    核心思想：边缘检测核心固定，通道对齐层动态创建
+    通用边缘头（简化版）：固定接收64通道输入
+    通道对齐由外部的EdgeAdapter处理，这里只做边缘检测
     """
     def __init__(self, 
-                 core_channels: int = 256, 
+                 core_channels: int = 64, 
                  output_channels: int = 1,
                  head_type: str = "simple",
                  init_p: float = 0.05):
@@ -149,7 +149,10 @@ class UniversalEdgeHead(nn.Module):
         self.output_channels = output_channels
         self.head_type = head_type
         
-        # 创建边缘检测核心
+        # 固定接收64通道输入（由EdgeAdapter保证）
+        assert core_channels == 64, "Edge head只支持64通道输入，使用EdgeAdapter做通道对齐"
+        
+        # 只创建边缘检测核心，不再包含通道对齐
         if head_type == "simple":
             self.edge_core = SimpleEdgeHead(core_channels, output_channels, init_p)
         elif head_type == "lightweight":
@@ -157,64 +160,36 @@ class UniversalEdgeHead(nn.Module):
         else:
             raise ValueError(f"Unknown head type: {head_type}")
         
-        # 动态通道对齐层（按backbone名称存储）
-        self.channel_aligners = nn.ModuleDict()
-        
-        # 统计信息
-        self.aligner_stats = {}
-    
-    def forward(self, x, backbone_name: str = "default"):
+    def forward(self, x):
         """
         Args:
-            x: 输入特征 (B, C, H, W)
-            backbone_name: backbone名称，用于区分不同的对齐层
+            x: 输入特征 (B, 64, H, W) - 必须是64通道，由EdgeAdapter保证
         Returns:
             edge_logits: 边缘logits (B, 1, H, W)
         """
-        input_channels = x.size(1)
+        assert x.size(1) == 64, f"输入必须是64通道，当前为{x.size(1)}。请使用EdgeAdapter进行通道对齐"
         
-        # 动态创建通道对齐层
-        if backbone_name not in self.channel_aligners:
-            self.channel_aligners[backbone_name] = nn.Conv2d(
-                input_channels, self.core_channels, 1
-            ).to(x.device)
-            
-            # 记录统计信息
-            self.aligner_stats[backbone_name] = {
-                'input_channels': input_channels,
-                'core_channels': self.core_channels,
-                'parameters': input_channels * self.core_channels
-            }
-            
-            print(f"[EdgeHead] 为 {backbone_name} 创建通道对齐层: {input_channels} -> {self.core_channels}")
-        
-        # 通道对齐
-        x_aligned = self.channel_aligners[backbone_name](x)
-        
-        # 边缘检测
-        edge_logits = self.edge_core(x_aligned)
+        # 直接进行边缘检测
+        edge_logits = self.edge_core(x)
         
         return edge_logits
     
     def get_stats(self):
         """获取统计信息"""
         core_params = sum(p.numel() for p in self.edge_core.parameters())
-        aligner_params = sum(p.numel() for p in self.channel_aligners.parameters())
         
         return {
             'head_type': self.head_type,
             'core_channels': self.core_channels,
             'core_parameters': core_params,
-            'aligner_parameters': aligner_params,
-            'total_parameters': core_params + aligner_params,
-            'aligner_stats': self.aligner_stats
+            'total_parameters': core_params,
         }
     
     def freeze_core(self):
-        """冻结核心参数，只训练对齐层"""
+        """冻结核心参数"""
         for param in self.edge_core.parameters():
             param.requires_grad = False
-        print("[EdgeHead] 核心参数已冻结，只训练对齐层")
+        print("[EdgeHead] 核心参数已冻结")
     
     def unfreeze_core(self):
         """解冻核心参数"""
@@ -238,7 +213,7 @@ class EdgeHeadManager:
         
         for head_name, head_config in head_configs.items():
             head_type = head_config.get('type', 'simple')
-            core_channels = head_config.get('core_channels', 256)
+            core_channels = head_config.get('core_channels', 64)
             output_channels = head_config.get('output_channels', 1)
             init_p = head_config.get('init_p', 0.05)
             
@@ -274,7 +249,7 @@ class EdgeHeadManager:
 def create_edge_head(config: Dict) -> UniversalEdgeHead:
     """工厂函数：创建边缘头"""
     head_type = config.get('type', 'simple')
-    core_channels = config.get('core_channels', 256)
+    core_channels = config.get('core_channels', 64)
     output_channels = config.get('output_channels', 1)
     init_p = config.get('init_p', 0.05)
     
@@ -292,7 +267,7 @@ def test_edge_head():
     
     # 创建边缘头
     edge_head = UniversalEdgeHead(
-        core_channels=256,
+        core_channels=64,
         output_channels=1,
         head_type="simple"
     )
