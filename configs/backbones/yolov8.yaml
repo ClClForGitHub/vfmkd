@@ -1,0 +1,19 @@
+# YOLOv8 backbone configuration
+name: "YOLOv8Backbone"
+model_size: "n"  # n, s, m, l, x
+pretrained: true
+freeze_backbone: false
+freeze_at: -1
+
+# Feature extraction settings
+feature_scales: [4, 8, 16]  # P2, P3, P4
+feature_dims: [128, 256, 512]  # Corresponding to model_size n
+
+# Training settings
+learning_rate: 0.01
+weight_decay: 0.0005
+momentum: 0.937
+
+# Model specific settings
+depth_multiple: 0.33
+width_multiple: 0.25

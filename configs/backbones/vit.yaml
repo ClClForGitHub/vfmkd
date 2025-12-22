@@ -1,0 +1,22 @@
+# Vision Transformer backbone configuration
+name: "ViTBackbone"
+model_size: "base"  # tiny, small, base, large
+pretrained: true
+freeze_backbone: false
+freeze_at: -1
+
+# Architecture settings
+patch_size: 16
+embed_dim: 768
+depth: 12
+num_heads: 12
+mlp_ratio: 4.0
+
+# Feature extraction settings
+feature_scales: [16, 16, 16]  # All features at 16x downsampling
+feature_dims: [768, 768, 768]  # All features have same dimension
+
+# Training settings
+learning_rate: 0.0001
+weight_decay: 0.05
+dropout: 0.1

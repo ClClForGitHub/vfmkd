@@ -1,0 +1,33 @@
+# SAM2教师模型配置
+model_name: "SAM2.1-Hiera-Base+"
+model_type: "sam2.1_hiera_b+"
+checkpoint_path: "weights/sam2.1_hiera_base_plus.pt"
+device: "cuda"
+
+# 特征提取配置
+feature_extraction:
+  target_size: 1024                    # 输入图像尺寸
+  batch_size: 1                       # 批处理大小
+  enable_enhanced_features: true       # 是否生成增强特征
+  fast_mode: false                    # 快速模式（跳过SDF/边缘）
+
+# 可视化配置
+enable_visualization: true
+vis_output_dir: "datasets/coco128/SAM_Cache/visualizations"
+
+# 存储配置（按项目计划）
+feature_output_dir: "datasets/coco128/SAM_Cache"
+format: "npz"                         # 存储格式
+compression: true                     # 是否压缩
+save_enhanced: true                   # 是否保存增强特征
+
+# 数据集配置
+datasets:
+  coco128:
+    img_dir: "datasets/coco128/images"
+    label_dir: "datasets/coco128/labels"
+    output_dir: "datasets/coco128/SAM_Cache"
+  coco:
+    img_dir: "datasets/coco/train2017"
+    label_dir: "datasets/coco/labels/train2017"
+    output_dir: "datasets/coco/SAM_Cache"

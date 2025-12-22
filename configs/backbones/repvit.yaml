@@ -1,0 +1,10 @@
+# RepViT backbone configuration
+arch: m1  # m1, m2, m3
+img_size: 1024
+fuse: false
+freeze: false
+load_from: null  # 预训练权重路径
+
+# 特征信息
+feature_dims: [256]
+feature_strides: [16]

@@ -1,0 +1,19 @@
+# DINO teacher configuration
+name: "DINOTeacher"
+model_type: "vit_base"  # vit_small, vit_base, vit_large
+pretrained: true
+freeze_teacher: true
+
+# Model paths
+model_path: "weights/dinov2_vitb14_pretrain.pth"
+config_path: "configs/dinov2_vitb14.yaml"
+
+# Feature extraction settings
+feature_types: ["cls_token", "patch_tokens"]
+feature_dims: [768, 768]
+feature_scales: [16, 16]
+
+# Distillation settings
+offline_mode: true
+feature_storage_path: "teacher_features/dino/"
+cache_features: true
